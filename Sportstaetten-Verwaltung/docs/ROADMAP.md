@@ -1,1 +1,4 @@
-# ROADMAP.md - Beispielinhalt
+## Roadmap aktualisiert
+- Buchung
+- Admin-Panel
+- Tests

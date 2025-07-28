@@ -1,1 +1,3 @@
-# DSGVO.md - Beispielinhalt
+## Datenschutzkonzept
+- Minimierung
+- Logging
