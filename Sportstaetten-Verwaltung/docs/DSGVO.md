@@ -1,0 +1,1 @@
+# DSGVO.md - Beispielinhalt
