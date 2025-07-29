@@ -1,0 +1,1 @@
+# Architekturdiagramm (C4-Light)
