@@ -1,3 +1,0 @@
-# Verzeichnis der Verarbeitungstätigkeiten
-
-## Buchungsdaten
