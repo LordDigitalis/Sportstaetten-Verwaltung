@@ -1,0 +1,28 @@
+
+openapi: 3.0.0
+info:
+  title: Sportstätten-Verwaltung API
+  version: 1.0.0
+paths:
+  /api/bookings:
+    post:
+      summary: Erstelle eine neue Buchung
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - facilityId
+                - userId
+                - startTime
+                - endTime
+              properties:
+                facilityId: { type: string }
+                userId: { type: string }
+                startTime: { type: string, format: date-time }
+                endTime: { type: string, format: date-time }
+      responses:
+        '201': { description: Erfolgreich }
+        '400': { description: Fehlerhafte Anfrage }

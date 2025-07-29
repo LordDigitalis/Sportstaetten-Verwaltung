@@ -1,0 +1,3 @@
+## Datenschutzkonzept
+- Minimierung
+- Logging
