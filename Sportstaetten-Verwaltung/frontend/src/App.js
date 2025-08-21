@@ -13,9 +13,10 @@ import BookingRequest from './components/BookingRequest';
 import Payment from './components/Payment';
 import Success from './components/Success';
 import Cancel from './components/Cancel';
+import Roles from './components/Roles';
 
 function App() {
-  const { i18n } = useTranslation();
+  const { t } = useTranslation();
 
   const changeLanguage = (lng) => {
     i18n.changeLanguage(lng);
@@ -40,9 +41,10 @@ function App() {
           <Route path="/contact" element={<ContactForm />} />
           <Route path="/dashboard" element={<AdminDashboard />} />
           <Route path="/request" element={<BookingRequest />} />
-          <Route path="/payment/:sessionId" element={<Payment />} />
+          <Route path="/payment/:bookingId" element={<Payment />} />
           <Route path="/success" element={<Success />} />
           <Route path="/cancel" element={<Cancel />} />
+          <Route path="/roles" element={<Roles />} />
           <Route path="/" element={<Login />} />
         </Routes>
       </Container>
