@@ -49,5 +49,17 @@
   "admin": "Admin",
   "manager": "Manager",
   "citizen": "Citizen",
-  "roleUpdated": "Role Updated"
+  "roleUpdated": "Role Updated",
+  "analytics": "Analytics",
+  "fetchAnalytics": "Fetch Analytics",
+  "totalRevenue": "Total Revenue",
+  "bookingCount": "Booking Count",
+  "bookingsByRoom": "Bookings by Room",
+  "startDate": "Start Date",
+  "endDate": "End Date",
+  "settings": "Settings",
+  "enablePushNotifications": "Enable Push Notifications",
+  "pushSettingsUpdated": "Push Settings Updated",
+  "refund": "Refund",
+  "refundSuccessful": "Refund Successful"
 }

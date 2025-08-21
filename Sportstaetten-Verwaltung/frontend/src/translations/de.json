@@ -49,5 +49,17 @@
   "admin": "Admin",
   "manager": "Manager",
   "citizen": "Bürger",
-  "roleUpdated": "Rolle aktualisiert"
+  "roleUpdated": "Rolle aktualisiert",
+  "analytics": "Statistiken",
+  "fetchAnalytics": "Statistiken abrufen",
+  "totalRevenue": "Gesamtumsatz",
+  "bookingCount": "Anzahl Buchungen",
+  "bookingsByRoom": "Buchungen pro Raum",
+  "startDate": "Startdatum",
+  "endDate": "Enddatum",
+  "settings": "Einstellungen",
+  "enablePushNotifications": "Push-Benachrichtigungen aktivieren",
+  "pushSettingsUpdated": "Push-Einstellungen aktualisiert",
+  "refund": "Rückerstattung",
+  "refundSuccessful": "Rückerstattung erfolgreich"
 }

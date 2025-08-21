@@ -18,6 +18,8 @@ import Cancel from './components/Cancel';
 import Reviews from './components/Reviews';
 import Roles from './components/Roles';
 import Map from './components/Map';
+import Analytics from './components/Analytics';
+import Settings from './components/Settings';
 
 const App = () => {
   const { t } = useTranslation();
@@ -57,6 +59,8 @@ const App = () => {
           <Route path="/reviews" element={<Reviews />} />
           <Route path="/roles" element={<Roles />} />
           <Route path="/map" element={<Map />} />
+          <Route path="/analytics" element={<Analytics />} />
+          <Route path="/settings" element={<Settings />} />
           <Route path="/" element={<Login />} />
         </Routes>
       </Router>

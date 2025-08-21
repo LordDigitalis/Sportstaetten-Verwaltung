@@ -1,5 +1,5 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { PrismaClient } = require('@prisma/client');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
@@ -7,7 +7,6 @@ const dotenv = require('dotenv');
 const nodemailer = require('nodemailer');
 const pdfmake = require('pdfmake/build/pdfmake');
 const pdfFonts = require('pdfmake/build/vfs_fonts');
-const fs = require('fs');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -17,6 +16,8 @@ const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 const { google } = require('googleapis');
 const twilio = require('twilio')(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+const Redis = require('ioredis');
+const axios = require('axios');
 
 dotenv.config();
 pdfmake.vfs = pdfFonts.pdfMake.vfs;
@@ -27,19 +28,8 @@ app.use(express.json());
 app.use(express.raw({ type: 'application/json', limit: '10mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 
-const db = new sqlite3.Database('./bookings.db');
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, password TEXT, role TEXT, phone TEXT)`);
-  db.run(`CREATE TABLE IF NOT EXISTS rooms (id INTEGER PRIMARY KEY, name TEXT, capacity INTEGER, price_per_hour REAL, lat REAL, lng REAL)`);
-  db.run(`CREATE TABLE IF NOT EXISTS features (id INTEGER PRIMARY KEY, room_id INTEGER, name TEXT, price REAL, FOREIGN KEY(room_id) REFERENCES rooms(id))`);
-  db.run(`CREATE TABLE IF NOT EXISTS bookings (id INTEGER PRIMARY KEY, room_id INTEGER, user_id INTEGER, start_time DATETIME, end_time DATETIME, status TEXT DEFAULT 'pending', features TEXT, payment_status TEXT DEFAULT 'unpaid', payment_method TEXT, google_event_id TEXT, FOREIGN KEY(room_id) REFERENCES rooms(id), FOREIGN KEY(user_id) REFERENCES users(id))`);
-  db.run(`CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, room_id INTEGER, user_id INTEGER, rating INTEGER, comment TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(room_id) REFERENCES rooms(id), FOREIGN KEY(user_id) REFERENCES users(id))`);
-  db.run(`CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY, type TEXT, message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
-  db.run(`DELETE FROM bookings WHERE end_time < DATETIME('now', '-1 year')`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_bookings_room_id ON bookings (room_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_features_room_id ON features (room_id)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_reviews_room_id ON reviews (room_id)`);
-});
+const prisma = new PrismaClient();
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
 const paypalClient = new paypal.core.PayPalHttpClient(new paypal.core.SandboxEnvironment(
   process.env.PAYPAL_CLIENT_ID,
@@ -71,6 +61,17 @@ const googleAuth = new google.auth.GoogleAuth({
 
 const calendar = google.calendar({ version: 'v3', auth: googleAuth });
 
+const getWeather = async (lat, lng, date) => {
+  const cacheKey = `weather:${lat}:${lng}:${date}`;
+  const cached = await redis.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+  const res = await axios.get(`https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lng}&appid=${process.env.OPENWEATHERMAP_API_KEY}`);
+  const weather = res.data.list.find(f => new Date(f.dt * 1000).toISOString().split('T')[0] === date);
+  const result = weather ? { condition: weather.weather[0].main, probability: weather.pop * 100 } : null;
+  if (result) await redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
+  return result;
+};
+
 const generateQRCode = async (booking, total) => {
   const qrData = `BCD
 001
@@ -85,68 +86,66 @@ Buchung ${booking.id}`;
   return await QRCode.toDataURL(qrData);
 };
 
-// Auto-Stornierung nach 48h mit E-Mail
-cron.schedule('0 0 * * *', () => {
-  db.all(`SELECT b.id, b.room_id, u.email, r.name FROM bookings b JOIN users u ON b.user_id = u.id JOIN rooms r ON b.room_id = r.id WHERE b.status = 'approved' AND b.payment_status = 'unpaid' AND b.created_at < DATETIME('now', '-2 days')`, [], (err, bookings) => {
-    if (err) console.error(err);
-    bookings.forEach(booking => {
-      db.run(`UPDATE bookings SET status = 'cancelled' WHERE id = ?`, [booking.id]);
-      transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: booking.email,
-        subject: 'Buchung storniert',
-        html: `<p>Ihre Buchung für Raum ${booking.name} (ID: ${booking.id}) wurde storniert, da keine Zahlung erfolgte.</p>`
-      }).catch(err => console.error(err));
-      db.run(`INSERT INTO logs (type, message) VALUES (?, ?)`, ['auto_cancel', `Buchung ${booking.id} storniert (unbezahlt)`]);
-    });
+cron.schedule('0 0 * * *', async () => {
+  const bookings = await prisma.booking.findMany({
+    where: { status: 'approved', paymentStatus: 'unpaid', createdAt: { lt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) } },
+    include: { user: true, room: true },
   });
+  for (const booking of bookings) {
+    await prisma.booking.update({ where: { id: booking.id }, data: { status: 'cancelled' } });
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: booking.user.email,
+      subject: booking.user.language === 'de' ? 'Buchung storniert' : 'Booking Cancelled',
+      html: `<p>${booking.user.language === 'de' ? 'Ihre Buchung für Raum' : 'Your booking for room'} ${booking.room.name} (ID: ${booking.id}) ${booking.user.language === 'de' ? 'wurde storniert, da keine Zahlung erfolgte.' : 'was cancelled due to non-payment.'}</p>`,
+    });
+    await prisma.log.create({ data: { type: 'auto_cancel', message: `Buchung ${booking.id} storniert (unbezahlt)` } });
+  }
 });
 
-// Reminders (E-Mail und SMS)
-cron.schedule('0 * * * *', () => {
-  db.all(`SELECT b.*, u.email, u.phone, r.name FROM bookings b JOIN users u ON b.user_id = u.id JOIN rooms r ON b.room_id = r.id WHERE b.status = 'approved' AND b.payment_status = 'paid' AND b.start_time BETWEEN DATETIME('now', '+23 hour') AND DATETIME('now', '+24 hour')`, [], (err, bookings) => {
-    if (err) console.error(err);
-    bookings.forEach(booking => {
-      const paymentLink = booking.payment_status === 'unpaid' ? `<a href="http://localhost:3000/payment/${booking.id}">Jetzt bezahlen</a>` : '';
-      transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: booking.email,
-        subject: 'Erinnerung an Ihre Buchung',
-        html: `<p>Erinnerung: Ihre Buchung für Raum ${booking.name} beginnt in 24 Stunden (${booking.start_time}). ${paymentLink}</p>`
-      }).catch(err => console.error(err));
-      if (booking.phone) {
-        twilio.messages.create({
-          body: `Erinnerung: Ihre Buchung für ${booking.name} beginnt in 24h (${booking.start_time}). ${booking.payment_status === 'unpaid' ? 'Bitte bezahlen: http://localhost:3000/payment/' + booking.id : ''}`,
-          from: process.env.TWILIO_PHONE,
-          to: booking.phone
-        }).catch(err => console.error(err));
-      }
-      db.run(`INSERT INTO logs (type, message) VALUES (?, ?)`, ['reminder', `Erinnerung für Buchung ${booking.id} gesendet`]);
-    });
+cron.schedule('0 * * * *', async () => {
+  const bookings = await prisma.booking.findMany({
+    where: {
+      status: 'approved',
+      paymentStatus: 'paid',
+      startTime: { gte: new Date(Date.now() + 23 * 60 * 60 * 1000), lte: new Date(Date.now() + 24 * 60 * 60 * 1000) },
+    },
+    include: { user: true, room: true },
   });
-});
-
-// KI-Empfehlungen (verbessert)
-const getRoomRecommendations = (userId, callback) => {
-  db.all(`SELECT room_id, COUNT(*) as count FROM bookings WHERE user_id = ? GROUP BY room_id ORDER BY count DESC LIMIT 3`, [userId], (err, bookings) => {
-    if (err || bookings.length === 0) {
-      db.all(`SELECT r.id, r.name, AVG(rev.rating) as avg_rating FROM rooms r LEFT JOIN reviews rev ON r.id = rev.room_id GROUP BY r.id ORDER BY avg_rating DESC LIMIT 3`, [], callback);
-    } else {
-      const roomIds = bookings.map(b => b.room_id);
-      db.all(`SELECT r.id, r.name, AVG(rev.rating) as avg_rating FROM rooms r LEFT JOIN reviews rev ON r.id = rev.room_id WHERE r.id NOT IN (${roomIds.join(',')}) GROUP BY r.id ORDER BY avg_rating DESC LIMIT 3`, [], callback);
+  for (const booking of bookings) {
+    const weather = await getWeather(booking.room.lat, booking.room.lng, booking.startTime.toISOString().split('T')[0]);
+    const weatherMsg = weather && weather.probability > 50 ? `${booking.user.language === 'de' ? 'Wetterwarnung' : 'Weather Warning'}: ${weather.condition} (${weather.probability}% ${booking.user.language === 'de' ? 'Wahrscheinlichkeit' : 'probability'})` : '';
+    const paymentLink = booking.paymentStatus === 'unpaid' ? `<a href="http://localhost:3000/payment/${booking.id}">${booking.user.language === 'de' ? 'Jetzt bezahlen' : 'Pay now'}</a>` : '';
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: booking.user.email,
+      subject: booking.user.language === 'de' ? 'Erinnerung an Ihre Buchung' : 'Booking Reminder',
+      html: `<p>${booking.user.language === 'de' ? 'Erinnerung: Ihre Buchung für Raum' : 'Reminder: Your booking for room'} ${booking.room.name} ${booking.user.language === 'de' ? 'beginnt in 24 Stunden' : 'starts in 24 hours'} (${booking.startTime}). ${paymentLink} ${weatherMsg}</p>`,
+    });
+    if (booking.user.phone) {
+      await twilio.messages.create({
+        body: `${booking.user.language === 'de' ? 'Erinnerung: Ihre Buchung für' : 'Reminder: Your booking for'} ${booking.room.name} ${booking.user.language === 'de' ? 'beginnt in 24h' : 'starts in 24h'} (${booking.startTime}). ${booking.paymentStatus === 'unpaid' ? 'Bitte bezahlen: http://localhost:3000/payment/' + booking.id : ''} ${weatherMsg}`,
+        from: process.env.TWILIO_PHONE,
+        to: booking.user.phone,
+      });
     }
-  });
-};
+    await prisma.log.create({ data: { type: 'reminder', message: `Erinnerung für Buchung ${booking.id} gesendet` } });
+  }
+});
 
 app.post('/register', async (req, res) => {
-  const { username, email, password, consent, phone } = req.body;
+  const { username, email, password, consent, phone, language } = req.body;
   if (!username || !email || !password || !consent) return res.status(400).json({ message: 'Alle Felder und Einwilligung erforderlich' });
   const hashedPw = await bcrypt.hash(password, 10);
-  db.run(`INSERT INTO users (username, email, password, role, phone) VALUES (?, ?, ?, 'citizen', ?)`, [username, email, hashedPw, phone || null], (err) => {
-    if (err) return res.status(400).json({ message: 'Benutzer existiert bereits' });
-    db.run(`INSERT INTO logs (type, message) VALUES (?, ?)`, ['register', `Neuer Benutzer: ${email}`]);
+  try {
+    await prisma.user.create({
+      data: { username, email, password: hashedPw, role: 'citizen', phone, language: language || 'de' },
+    });
+    await prisma.log.create({ data: { type: 'register', message: `Neuer Benutzer: ${email}` } });
     res.status(201).json({ message: 'Registriert' });
-  });
+  } catch (err) {
+    res.status(400).json({ message: 'Benutzer existiert bereits' });
+  }
 });
 
 app.post('/auth/google', authenticate, async (req, res) => {
@@ -163,140 +162,234 @@ app.post('/auth/google', authenticate, async (req, res) => {
 
 app.put('/bookings/:id/approve', authenticate, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ message: 'Nur Admins oder Manager' });
-  db.get(`SELECT b.*, r.name, r.price_per_hour FROM bookings b JOIN rooms r ON b.room_id = r.id WHERE b.id = ?`, [req.params.id], async (err, booking) => {
-    if (!booking) return res.status(404).json({ message: 'Buchung nicht gefunden' });
-    db.get(`SELECT email, language FROM users WHERE id = ?`, [booking.user_id], async (err, user) => {
-      const duration = (new Date(booking.end_time) - new Date(booking.start_time)) / (1000 * 60 * 60);
-      let total = duration * booking.price_per_hour;
-      const selectedFeatures = JSON.parse(booking.features || '[]');
-      let featureNames = [], featureTotal = 0;
-      const qrCodeUrl = await generateQRCode(booking, total);
-      const language = user.language || 'de';
-      if (selectedFeatures.length > 0) {
-        db.all(`SELECT name, price FROM features WHERE id IN (${selectedFeatures.join(',')})`, [], async (err, featureData) => {
-          featureData.forEach(f => {
-            featureTotal += f.price;
-            featureNames.push(f.name);
-          });
-          total += featureTotal;
-          const stripeSession = await stripe.checkout.sessions.create({
-            payment_method_types: ['card'],
-            line_items: [{ price_data: { currency: 'eur', product_data: { name: `Buchung ${booking.id} - ${booking.name}` }, unit_amount: Math.round(total * 100) }, quantity: 1 }],
-            mode: 'payment',
-            success_url: 'http://localhost:3000/success',
-            cancel_url: 'http://localhost:3000/cancel',
-            metadata: { booking_id: booking.id.toString() }
-          });
-          const paypalRequest = new paypal.orders.OrdersCreateRequest();
-          paypalRequest.requestBody({
-            intent: 'CAPTURE',
-            purchase_units: [{ amount: { currency_code: 'EUR', value: total.toFixed(2), breakdown: { item_total: { currency_code: 'EUR', value: total.toFixed(2) } } }, description: `Buchung ${booking.id} - ${booking.name}`, custom_id: booking.id.toString() }],
-            application_context: { return_url: 'http://localhost:3000/success', cancel_url: 'http://localhost:3000/cancel' }
-          });
-          const paypalResponse = await paypalClient.execute(paypalRequest);
-          const calendarEvent = await calendar.events.insert({
-            calendarId: 'primary',
-            requestBody: {
-              summary: `Buchung ${booking.name}`,
-              description: `Buchung ID: ${booking.id}, Status: ${booking.status}`,
-              start: { dateTime: booking.start_time },
-              end: { dateTime: booking.end_time }
-            }
-          });
-          db.run(`UPDATE bookings SET status = 'approved', google_event_id = ? WHERE id = ?`, [calendarEvent.data.id, req.params.id]);
-          const docDefinition = {
-            content: [
-              { text: language === 'de' ? 'Rechnung' : 'Invoice', style: 'header' },
-              { text: `Buchung ID: ${booking.id}` },
-              { text: `Raum: ${booking.name}` },
-              { text: `Zeit: ${booking.start_time} - ${booking.end_time}` },
-              { text: `Features: ${featureNames.join(', ') || (language === 'de' ? 'Keine' : 'None')}` },
-              { text: `Betrag: ${total.toFixed(2)}€` },
-              { text: language === 'de' ? 'Zahlungsoptionen:' : 'Payment Options:', style: 'subheader' },
-              { text: `Stripe: ${stripeSession.url}`, style: 'link' },
-              { text: `PayPal: ${paypalResponse.result.links.find(link => link.rel === 'approve').href}`, style: 'link' },
-              { text: language === 'de' ? 'Sofortüberweisung:' : 'Instant Transfer:', style: 'subheader' },
-              { image: qrCodeUrl, width: 100 }
-            ],
-            styles: { header: { fontSize: 18, bold: true }, subheader: { fontSize: 14, bold: true }, link: { color: 'blue', decoration: 'underline' } }
-          };
-          const pdfDoc = pdfmake.createPdfKitDocument(docDefinition, {});
-          if (!fs.existsSync('invoices')) fs.mkdirSync('invoices');
-          pdfDoc.pipe(fs.createWriteStream(`invoices/${booking.id}.pdf`));
-          pdfDoc.end();
-          await transporter.sendMail({
-            from: process.env.EMAIL_USER,
-            to: user.email,
-            subject: language === 'de' ? 'Buchung genehmigt' : 'Booking Approved',
-            html: language === 'de'
-              ? `<p>Ihre Buchung für Raum ${booking.name} ist genehmigt. Betrag: ${total.toFixed(2)}€.</p>
-                 <p>Zahlungsoptionen:</p>
-                 <ul>
-                   <li><a href="${stripeSession.url}">Stripe bezahlen</a></li>
-                   <li><a href="${paypalResponse.result.links.find(link => link.rel === 'approve').href}">PayPal bezahlen</a></li>
-                   <li>Sofortüberweisung: Scannen Sie den QR-Code mit Ihrer Bank-App:<br><img src="${qrCodeUrl}" width="100"/></li>
-                 </ul>`
-              : `<p>Your booking for room ${booking.name} has been approved. Amount: ${total.toFixed(2)}€.</p>
-                 <p>Payment options:</p>
-                 <ul>
-                   <li><a href="${stripeSession.url}">Pay with Stripe</a></li>
-                   <li><a href="${paypalResponse.result.links.find(link => link.rel === 'approve').href}">Pay with PayPal</a></li>
-                   <li>Instant Transfer: Scan the QR code with your banking app:<br><img src="${qrCodeUrl}" width="100"/></li>
-                 </ul>`
-          }).catch(() => {});
-          db.run(`INSERT INTO logs (type, message) VALUES (?, ?)`, ['booking_approve', `Buchung ${booking.id} genehmigt, Zahlungslinks gesendet`]);
-          res.json({ message: 'Genehmigt, Rechnung generiert', stripeSessionId: stripeSession.id, paypalOrderId: paypalResponse.result.id });
-        });
-      } else {
-        // ... (Ähnlicher Code ohne Features)
-      }
+  const booking = await prisma.booking.findUnique({
+    where: { id: parseInt(req.params.id) },
+    include: { room: true, user: true },
+  });
+  if (!booking) return res.status(404).json({ message: 'Buchung nicht gefunden' });
+  const duration = (new Date(booking.endTime) - new Date(booking.startTime)) / (1000 * 60 * 60);
+  let total = duration * booking.room.pricePerHour;
+  const selectedFeatures = JSON.parse(booking.features || '[]');
+  let featureNames = [], featureTotal = 0;
+  const qrCodeUrl = await generateQRCode(booking, total);
+  if (selectedFeatures.length > 0) {
+    const featureData = await prisma.feature.findMany({ where: { id: { in: selectedFeatures } } });
+    featureData.forEach(f => {
+      featureTotal += f.price;
+      featureNames.push(f.name);
     });
+    total += featureTotal;
+  }
+  const stripeSession = await stripe.checkout.sessions.create({
+    payment_method_types: ['card'],
+    line_items: [{ price_data: { currency: 'eur', product_data: { name: `Buchung ${booking.id} - ${booking.room.name}` }, unit_amount: Math.round(total * 100) }, quantity: 1 }],
+    mode: 'payment',
+    success_url: 'http://localhost:3000/success',
+    cancel_url: 'http://localhost:3000/cancel',
+    metadata: { booking_id: booking.id.toString() },
   });
+  const paypalRequest = new paypal.orders.OrdersCreateRequest();
+  paypalRequest.requestBody({
+    intent: 'CAPTURE',
+    purchase_units: [{ amount: { currency_code: 'EUR', value: total.toFixed(2), breakdown: { item_total: { currency_code: 'EUR', value: total.toFixed(2) } } }, description: `Buchung ${booking.id} - ${booking.room.name}`, custom_id: booking.id.toString() }],
+    application_context: { return_url: 'http://localhost:3000/success', cancel_url: 'http://localhost:3000/cancel' },
+  });
+  const paypalResponse = await paypalClient.execute(paypalRequest);
+  const calendarEvent = await calendar.events.insert({
+    calendarId: 'primary',
+    requestBody: {
+      summary: `Buchung ${booking.room.name}`,
+      description: `Buchung ID: ${booking.id}, Status: ${booking.status}`,
+      start: { dateTime: booking.startTime },
+      end: { dateTime: booking.endTime },
+    },
+  });
+  await prisma.booking.update({
+    where: { id: booking.id },
+    data: { status: 'approved', googleEventId: calendarEvent.data.id },
+  });
+  const docDefinition = {
+    content: [
+      { text: booking.user.language === 'de' ? 'Rechnung' : 'Invoice', style: 'header' },
+      { text: `Buchung ID: ${booking.id}` },
+      { text: `Raum: ${booking.room.name}` },
+      { text: `Zeit: ${booking.startTime} - ${booking.endTime}` },
+      { text: `Features: ${featureNames.join(', ') || (booking.user.language === 'de' ? 'Keine' : 'None')}` },
+      { text: `Betrag: ${total.toFixed(2)}€` },
+      { text: booking.user.language === 'de' ? 'Zahlungsoptionen:' : 'Payment Options:', style: 'subheader' },
+      { text: `Stripe: ${stripeSession.url}`, style: 'link' },
+      { text: `PayPal: ${paypalResponse.result.links.find(link => link.rel === 'approve').href}`, style: 'link' },
+      { text: booking.user.language === 'de' ? 'Sofortüberweisung:' : 'Instant Transfer:', style: 'subheader' },
+      { image: qrCodeUrl, width: 100 },
+    ],
+    styles: { header: { fontSize: 18, bold: true }, subheader: { fontSize: 14, bold: true }, link: { color: 'blue', decoration: 'underline' } },
+  };
+  const pdfDoc = pdfmake.createPdfKitDocument(docDefinition, {});
+  pdfDoc.pipe(require('fs').createWriteStream(`invoices/${booking.id}.pdf`));
+  pdfDoc.end();
+  await transporter.sendMail({
+    from: process.env.EMAIL_USER,
+    to: booking.user.email,
+    subject: booking.user.language === 'de' ? 'Buchung genehmigt' : 'Booking Approved',
+    html: booking.user.language === 'de'
+      ? `<p>Ihre Buchung für Raum ${booking.room.name} ist genehmigt. Betrag: ${total.toFixed(2)}€.</p>
+         <p>Zahlungsoptionen:</p>
+         <ul>
+           <li><a href="${stripeSession.url}">Stripe bezahlen</a></li>
+           <li><a href="${paypalResponse.result.links.find(link => link.rel === 'approve').href}">PayPal bezahlen</a></li>
+           <li>Sofortüberweisung: Scannen Sie den QR-Code mit Ihrer Bank-App:<br><img src="${qrCodeUrl}" width="100"/></li>
+         </ul>`
+      : `<p>Your booking for room ${booking.room.name} has been approved. Amount: ${total.toFixed(2)}€.</p>
+         <p>Payment options:</p>
+         <ul>
+           <li><a href="${stripeSession.url}">Pay with Stripe</a></li>
+           <li><a href="${paypalResponse.result.links.find(link => link.rel === 'approve').href}">Pay with PayPal</a></li>
+           <li>Instant Transfer: Scan the QR code with your banking app:<br><img src="${qrCodeUrl}" width="100"/></li>
+         </ul>`,
+  });
+  await prisma.log.create({ data: { type: 'booking_approve', message: `Buchung ${booking.id} genehmigt, Zahlungslinks gesendet` } });
+  res.json({ message: 'Genehmigt, Rechnung generiert', stripeSessionId: stripeSession.id, paypalOrderId: paypalResponse.result.id });
 });
 
-app.post('/reviews', authenticate, (req, res) => {
-  const { room_id, rating, comment } = req.body;
-  if (!room_id || !rating || rating < 1 || rating > 5 || (comment && comment.length > 500)) return res.status(400).json({ message: 'Ungültige Bewertung oder Kommentar zu lang' });
-  db.run(`INSERT INTO reviews (room_id, user_id, rating, comment) VALUES (?, ?, ?, ?)`, [room_id, req.user.id, rating, comment || ''], (err) => {
-    if (err) return res.status(500).json({ message: 'Serverfehler' });
-    db.run(`INSERT INTO logs (type, message) VALUES (?, ?)`, ['review', `Bewertung für Raum ${room_id} von User ${req.user.id}`]);
-    res.status(201).json({ message: 'Bewertung gespeichert' });
+app.post('/bookings/:id/refund', authenticate, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ message: 'Nur Admins oder Manager' });
+  const booking = await prisma.booking.findUnique({
+    where: { id: parseInt(req.params.id) },
+    include: { user: true, room: true },
   });
+  if (!booking || booking.paymentStatus !== 'paid') return res.status(400).json({ message: 'Buchung nicht bezahlt oder nicht gefunden' });
+  const duration = (new Date(booking.endTime) - new Date(booking.startTime)) / (1000 * 60 * 60);
+  let total = duration * booking.room.pricePerHour;
+  const selectedFeatures = JSON.parse(booking.features || '[]');
+  if (selectedFeatures.length > 0) {
+    const featureData = await prisma.feature.findMany({ where: { id: { in: selectedFeatures } } });
+    total += featureData.reduce((sum, f) => sum + f.price, 0);
+  }
+  if (booking.paymentMethod === 'stripe') {
+    const refund = await stripe.refunds.create({ payment_intent: booking.paymentIntentId });
+    await prisma.booking.update({ where: { id: booking.id }, data: { paymentStatus: 'refunded' } });
+  } else if (booking.paymentMethod === 'paypal') {
+    const request = new paypal.payments.CapturesRefundRequest(booking.paymentIntentId);
+    request.requestBody({ amount: { currency_code: 'EUR', value: total.toFixed(2) } });
+    await paypalClient.execute(request);
+    await prisma.booking.update({ where: { id: booking.id }, data: { paymentStatus: 'refunded' } });
+  } else if (booking.paymentMethod === 'klarna') {
+    // TODO: Klarna Rückerstattung (Edge-Case für Teilrückerstattungen)
+    return res.status(501).json({ message: 'Klarna Rückerstattung noch nicht implementiert' });
+  }
+  await transporter.sendMail({
+    from: process.env.EMAIL_USER,
+    to: booking.user.email,
+    subject: booking.user.language === 'de' ? 'Rückerstattung erfolgreich' : 'Refund Successful',
+    html: `<p>${booking.user.language === 'de' ? 'Ihre Rückerstattung für Buchung' : 'Your refund for booking'} ${booking.id} (${booking.room.name}, ${total.toFixed(2)}€) ${booking.user.language === 'de' ? 'wurde verarbeitet.' : 'has been processed.'}</p>`,
+  });
+  await prisma.log.create({ data: { type: 'refund', message: `Rückerstattung für Buchung ${booking.id} (${total.toFixed(2)}€)` } });
+  res.json({ message: 'Rückerstattung erfolgreich' });
 });
 
-app.get('/reviews/:room_id', (req, res) => {
-  db.all(`SELECT r.*, u.username FROM reviews r JOIN users u ON r.user_id = u.id WHERE r.room_id = ?`, [req.params.room_id], (err, reviews) => {
-    if (err) return res.status(500).json({ message: 'Serverfehler' });
-    db.get(`SELECT AVG(rating) as avg_rating FROM reviews WHERE room_id = ?`, [req.params.room_id], (err, result) => {
-      res.json({ reviews, avg_rating: result.avg_rating || 0 });
-    });
-  });
-});
-
-app.get('/recommendations', authenticate, (req, res) => {
-  getRoomRecommendations(req.user.id, (err, rooms) => {
-    if (err) return res.status(500).json({ message: 'Serverfehler' });
-    res.json(rooms);
-  });
-});
-
-app.get('/users', authenticate, (req, res) => {
+app.get('/export/bookings', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ message: 'Nur Admins' });
-  db.all(`SELECT id, username, email, role FROM users`, [], (err, users) => {
-    if (err) return res.status(500).json({ message: 'Serverfehler' });
-    res.json(users);
+  const bookings = await prisma.booking.findMany({ include: { user: true, room: true } });
+  const csv = ['id,room,user,start_time,end_time,status,payment_status,payment_method'];
+  bookings.forEach(b => {
+    csv.push(`${b.id},${b.room.name},${b.user.username},${b.startTime},${b.endTime},${b.status},${b.paymentStatus},${b.paymentMethod || ''}`);
   });
+  res.header('Content-Type', 'text/csv');
+  res.attachment('bookings.csv');
+  res.send(csv.join('\n'));
 });
 
-app.put('/users/:id/role', authenticate, (req, res) => {
+app.get('/export/reviews', authenticate, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ message: 'Nur Admins' });
+  const reviews = await prisma.review.findMany({ include: { user: true, room: true } });
+  const csv = ['id,room,user,rating,comment,created_at'];
+  reviews.forEach(r => {
+    csv.push(`${r.id},${r.room.name},${r.user.username},${r.rating},${r.comment.replace(/,/g, ';')},${r.createdAt}`);
+  });
+  res.header('Content-Type', 'text/csv');
+  res.attachment('reviews.csv');
+  res.send(csv.join('\n'));
+});
+
+app.get('/analytics', authenticate, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ message: 'Nur Admins' });
+  const { startDate, endDate, roomId } = req.query;
+  const bookings = await prisma.booking.findMany({
+    where: {
+      startTime: { gte: new Date(startDate), lte: new Date(endDate) },
+      ...(roomId && { roomId: parseInt(roomId) }),
+    },
+    include: { room: true },
+  });
+  const totalRevenue = bookings.reduce((sum, b) => {
+    const duration = (new Date(b.endTime) - new Date(b.startTime)) / (1000 * 60 * 60);
+    let total = duration * b.room.pricePerHour;
+    const features = JSON.parse(b.features || '[]');
+    if (features.length > 0) {
+      total += features.reduce(async (sum, fId) => {
+        const f = await prisma.feature.findUnique({ where: { id: fId } });
+        return sum + (f?.price || 0);
+      }, 0);
+    }
+    return sum + (b.paymentStatus === 'paid' ? total : 0);
+  }, 0);
+  const bookingCount = bookings.length;
+  const bookingsByRoom = bookings.reduce((acc, b) => {
+    acc[b.room.name] = (acc[b.room.name] || 0) + 1;
+    return acc;
+  }, {});
+  res.json({ totalRevenue, bookingCount, bookingsByRoom });
+});
+
+app.get('/recommendations', authenticate, async (req, res) => {
+  const cacheKey = `recommendations:${req.user.id}`;
+  const cached = await redis.get(cacheKey);
+  if (cached) return res.json(JSON.parse(cached));
+  const bookings = await prisma.booking.groupBy({
+    by: ['roomId'],
+    where: { userId: req.user.id },
+    _count: { roomId: true },
+    orderBy: { _count: { roomId: 'desc' } },
+    take: 3,
+  });
+  let rooms;
+  if (bookings.length === 0) {
+    rooms = await prisma.room.findMany({
+      include: { reviews: { select: { rating: true } } },
+      take: 3,
+      orderBy: { reviews: { _avg: { rating: 'desc' } } },
+    });
+  } else {
+    const roomIds = bookings.map(b => b.roomId);
+    rooms = await prisma.room.findMany({
+      where: { id: { notIn: roomIds } },
+      include: { reviews: { select: { rating: true } } },
+      take: 3,
+      orderBy: { reviews: { _avg: { rating: 'desc' } } },
+    });
+  }
+  const result = rooms.map(r => ({
+    id: r.id,
+    name: r.name,
+    avg_rating: r.reviews.length > 0 ? r.reviews.reduce((sum, rev) => sum + rev.rating, 0) / r.reviews.length : 0,
+  }));
+  await redis.set(cacheKey, JSON.stringify(result), 'EX', 3600);
+  res.json(result);
+});
+
+app.get('/users', authenticate, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ message: 'Nur Admins' });
+  const users = await prisma.user.findMany({ select: { id: true, username: true, email: true, role: true } });
+  res.json(users);
+});
+
+app.put('/users/:id/role', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ message: 'Nur Admins' });
   const { role } = req.body;
   if (!['admin', 'manager', 'citizen'].includes(role)) return res.status(400).json({ message: 'Ungültige Rolle' });
-  db.run(`UPDATE users SET role = ? WHERE id = ?`, [role, req.params.id], (err) => {
-    if (err) return res.status(500).json({ message: 'Serverfehler' });
-    db.run(`INSERT INTO logs (type, message) VALUES (?, ?)`, ['role_update', `Rolle für User ${req.params.id} zu ${role} geändert`]);
-    res.json({ message: 'Rolle aktualisiert' });
-  });
+  await prisma.user.update({ where: { id: parseInt(req.params.id) }, data: { role } });
+  await prisma.log.create({ data: { type: 'role_update', message: `Rolle für User ${req.params.id} zu ${role} geändert` } });
+  res.json({ message: 'Rolle aktualisiert' });
 });
 
 app.listen(process.env.PORT || 5000, () => console.log('Server running'));

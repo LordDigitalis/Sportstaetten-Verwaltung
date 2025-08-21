@@ -1,98 +1,61 @@
 import React, { useState, useEffect } from 'react';
-import { loadStripe } from '@stripe/stripe-js';
-import { Elements } from '@stripe/react-stripe-js';
-import { PayPalButtons, PayPalScriptProvider } from '@paypal/react-paypal-js';
-import { Box, Typography, FormControl, InputLabel, Select, MenuItem, Button, CircularProgress } from '@mui/material';
+import { useParams, useNavigate } from 'react-router-dom';
+import { Typography, Box, Button, CircularProgress } from '@mui/material';
 import axios from 'axios';
-import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-
-const stripePromise = loadStripe(process.env.REACT_APP_STRIPE_PUBLIC_KEY);
 
 const Payment = () => {
   const { t } = useTranslation();
   const { bookingId } = useParams();
-  const [paymentMethod, setPaymentMethod] = useState('');
+  const navigate = useNavigate();
   const [booking, setBooking] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [qrCode, setQrCode] = useState('');
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const fetchBooking = async () => {
-      try {
-        const token = localStorage.getItem('token');
-        const res = await axios.get(`http://localhost:5000/bookings`, { headers: { Authorization: `Bearer ${token}` } });
-        const bookingData = res.data.find(b => b.id === parseInt(bookingId));
-        setBooking(bookingData);
-        if (bookingData.payment_status === 'unpaid') {
-          const qrRes = await axios.get(`http://localhost:5000/invoices/${bookingId}`, { headers: { Authorization: `Bearer ${token}` } });
-          setQrCode(qrRes.data.qrCodeUrl);
-        }
-      } catch (err) {
-        alert(err.response?.data?.message || t('error'));
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchBooking();
+    setLoading(true);
+    const token = localStorage.getItem('token');
+    axios.get(`http://localhost:5000/bookings/${bookingId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(res => {
+      setBooking(res.data);
+      setLoading(false);
+    }).catch(() => {
+      alert(t('error'));
+      setLoading(false);
+    });
   }, [bookingId]);
 
-  const handleStripePayment = async () => {
+  const requestRefund = async () => {
     setLoading(true);
+    const token = localStorage.getItem('token');
     try {
-      const stripe = await stripePromise;
-      await stripe.redirectToCheckout({ sessionId: booking.stripeSessionId });
+      await axios.post(`http://localhost:5000/bookings/${bookingId}/refund`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      alert(t('refundSuccessful'));
+      navigate('/calendar');
     } catch (err) {
-      alert(t('error'));
+      alert(err.response?.data?.message || t('error'));
     } finally {
       setLoading(false);
     }
   };
 
-  const handlePaypalPayment = () => {
-    // PayPalButtons handles the flow
-  };
-
   return (
-    <Box sx={{ maxWidth: 400, mx: 'auto', mt: 4 }}>
-      <Typography variant="h4" gutterBottom>{t('payNow')}</Typography>
+    <Box sx={{ maxWidth: 600, mx: 'auto', mt: 4 }}>
+      <Typography variant="h4" gutterBottom>{t('payment')}</Typography>
       {loading || !booking ? (
         <CircularProgress />
       ) : (
         <>
-          <FormControl fullWidth sx={{ mb: 2 }}>
-            <InputLabel>{t('selectPaymentMethod')}</InputLabel>
-            <Select value={paymentMethod} onChange={e => setPaymentMethod(e.target.value)}>
-              <MenuItem value="stripe">{t('stripe')}</MenuItem>
-              <MenuItem value="paypal">{t('paypal')}</MenuItem>
-              <MenuItem value="sofort">{t('sofort')}</MenuItem>
-            </Select>
-          </FormControl>
-          {paymentMethod === 'stripe' && (
-            <Button variant="contained" onClick={handleStripePayment} disabled={loading}>
-              {loading ? <CircularProgress size={24} /> : t('payNow')}
+          <Typography variant="h6">Buchung ID: {booking.id}</Typography>
+          <Typography>Raum: {booking.room.name}</Typography>
+          <Typography>Zeit: {booking.startTime} - {booking.endTime}</Typography>
+          <Typography>Zahlungsstatus: {booking.paymentStatus}</Typography>
+          {booking.paymentStatus === 'paid' && (
+            <Button variant="contained" color="warning" onClick={requestRefund} sx={{ mt: 2 }} disabled={loading}>
+              {loading ? <CircularProgress size={24} /> : t('refund')}
             </Button>
-          )}
-          {paymentMethod === 'paypal' && (
-            <PayPalScriptProvider options={{ "client-id": process.env.REACT_APP_PAYPAL_CLIENT_ID }}>
-              <PayPalButtons
-                createOrder={(data, actions) => actions.order.create({
-                  purchase_units: [{ amount: { value: booking.total.toFixed(2), currency_code: 'EUR' }, custom_id: booking.id.toString() }]
-                })}
-                onApprove={(data, actions) => actions.order.capture().then(() => {
-                  axios.put(`http://localhost:5000/bookings/${bookingId}/update-payment`, { payment_status: 'paid', payment_method: 'paypal' }, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } })
-                    .then(() => window.location.href = '/success')
-                    .catch(err => alert(err.response?.data?.message || t('error')));
-                })}
-              />
-            </PayPalScriptProvider>
-          )}
-          {paymentMethod === 'sofort' && (
-            <Box>
-              <Typography>{t('sofort')}</Typography>
-              <img src={qrCode} alt="QR Code" style={{ width: '100px' }} />
-              <Typography>Scannen Sie den QR-Code mit Ihrer Bank-App.</Typography>
-            </Box>
           )}
         </>
       )}

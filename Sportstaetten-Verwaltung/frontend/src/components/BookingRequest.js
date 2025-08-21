@@ -1,19 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { TextField, Button, Typography, Box, FormControl, InputLabel, Select, MenuItem, FormGroup, FormControlLabel, Checkbox, CircularProgress } from '@mui/material';
+import { TextField, Button, Typography, Box, FormControl, InputLabel, Select, MenuItem, Checkbox, ListItemText, CircularProgress } from '@mui/material';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 
 const BookingRequest = () => {
   const { t } = useTranslation();
   const [rooms, setRooms] = useState([]);
-  const [features, setFeatures] = useState([]);
-  const [roomId, setRoomId] = useState('');
-  const [selectedFeatures, setSelectedFeatures] = useState([]);
+  const [selectedRoom, setSelectedRoom] = useState('');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
-  const [capacityFilter, setCapacityFilter] = useState('');
-  const [priceFilter, setPriceFilter] = useState('');
-  const [recommendations, setRecommendations] = useState([]);
+  const [features, setFeatures] = useState([]);
+  const [selectedFeatures, setSelectedFeatures] = useState([]);
+  const [weather, setWeather] = useState(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -25,52 +23,43 @@ const BookingRequest = () => {
       alert(t('error'));
       setLoading(false);
     });
-    const token = localStorage.getItem('token');
-    axios.get('http://localhost:5000/recommendations', { headers: { Authorization: `Bearer ${token}` } })
-      .then(res => setRecommendations(res.data))
-      .catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (roomId) {
-      setLoading(true);
-      axios.get(`http://localhost:5000/features/${roomId}`)
-        .then(res => {
-          setFeatures(res.data);
-          setLoading(false);
-        })
-        .catch(() => {
-          alert(t('error'));
-          setLoading(false);
-        });
+    if (selectedRoom && startTime) {
+      const room = rooms.find(r => r.id === parseInt(selectedRoom));
+      if (room) {
+        axios.get(`http://localhost:5000/weather?lat=${room.lat}&lng=${room.lng}&date=${startTime.split('T')[0]}`).then(res => {
+          setWeather(res.data);
+        }).catch(() => setWeather(null));
+      }
+      axios.get(`http://localhost:5000/features?room_id=${selectedRoom}`).then(res => {
+        setFeatures(res.data);
+      }).catch(() => setFeatures([]));
     }
-  }, [roomId]);
+  }, [selectedRoom, startTime]);
 
-  const handleFeatureChange = (id) => {
-    setSelectedFeatures(prev => prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]);
-  };
-
-  const handleRequest = async () => {
+  const submitRequest = async () => {
     setLoading(true);
     const token = localStorage.getItem('token');
     try {
-      await axios.post('http://localhost:5000/bookings/request', { room_id: roomId, start_time: startTime, end_time: endTime, features: selectedFeatures }, { headers: { Authorization: `Bearer ${token}` } });
-      alert(t('requestSent'));
-      setRoomId('');
-      setSelectedFeatures([]);
+      await axios.post('http://localhost:5000/bookings', {
+        room_id: selectedRoom,
+        start_time: startTime,
+        end_time: endTime,
+        features: selectedFeatures,
+      }, { headers: { Authorization: `Bearer ${token}` } });
+      alert(t('requestSubmitted'));
+      setSelectedRoom('');
       setStartTime('');
       setEndTime('');
+      setSelectedFeatures([]);
     } catch (err) {
       alert(err.response?.data?.message || t('error'));
     } finally {
       setLoading(false);
     }
   };
-
-  const filteredRooms = rooms.filter(room => (
-    (!capacityFilter || room.capacity >= parseInt(capacityFilter)) &&
-    (!priceFilter || room.price_per_hour <= parseFloat(priceFilter))
-  ));
 
   return (
     <Box sx={{ maxWidth: 600, mx: 'auto', mt: 4 }}>
@@ -79,37 +68,54 @@ const BookingRequest = () => {
         <CircularProgress />
       ) : (
         <>
-          <Typography variant="h6" gutterBottom>{t('recommendations')}</Typography>
-          <List>
-            {recommendations.map(room => (
-              <ListItem key={room.id}>
-                <ListItemText primary={`Raum ${room.name} (Empfohlen)`} />
-              </ListItem>
-            ))}
-          </List>
-          <TextField fullWidth label={t('capacityFilter')} type="number" value={capacityFilter} onChange={e => setCapacityFilter(e.target.value)} margin="normal" />
-          <TextField fullWidth label={t('priceFilter')} type="number" value={priceFilter} onChange={e => setPriceFilter(e.target.value)} margin="normal" />
           <FormControl fullWidth margin="normal">
             <InputLabel>{t('room')}</InputLabel>
-            <Select value={roomId} onChange={e => setRoomId(e.target.value)}>
-              {filteredRooms.map(room => (
+            <Select value={selectedRoom} onChange={e => setSelectedRoom(e.target.value)}>
+              {rooms.map(room => (
                 <MenuItem key={room.id} value={room.id}>{room.name}</MenuItem>
               ))}
             </Select>
           </FormControl>
-          <Typography variant="h6" gutterBottom>{t('features')}</Typography>
-          <FormGroup>
-            {features.map(feature => (
-              <FormControlLabel
-                key={feature.id}
-                control={<Checkbox checked={selectedFeatures.includes(feature.id)} onChange={() => handleFeatureChange(feature.id)} />}
-                label={`${feature.name} (${feature.price}€)`}
-              />
-            ))}
-          </FormGroup>
-          <TextField fullWidth label={t('startTime')} type="datetime-local" value={startTime} onChange={e => setStartTime(e.target.value)} margin="normal" />
-          <TextField fullWidth label={t('endTime')} type="datetime-local" value={endTime} onChange={e => setEndTime(e.target.value)} margin="normal" />
-          <Button variant="contained" onClick={handleRequest} fullWidth sx={{ mt: 2 }} disabled={loading}>
+          <TextField
+            fullWidth
+            label={t('startTime')}
+            type="datetime-local"
+            value={startTime}
+            onChange={e => setStartTime(e.target.value)}
+            margin="normal"
+            InputLabelProps={{ shrink: true }}
+          />
+          <TextField
+            fullWidth
+            label={t('endTime')}
+            type="datetime-local"
+            value={endTime}
+            onChange={e => setEndTime(e.target.value)}
+            margin="normal"
+            InputLabelProps={{ shrink: true }}
+          />
+          <FormControl fullWidth margin="normal">
+            <InputLabel>{t('features')}</InputLabel>
+            <Select
+              multiple
+              value={selectedFeatures}
+              onChange={e => setSelectedFeatures(e.target.value)}
+              renderValue={selected => selected.map(id => features.find(f => f.id === id)?.name).join(', ')}
+            >
+              {features.map(feature => (
+                <MenuItem key={feature.id} value={feature.id}>
+                  <Checkbox checked={selectedFeatures.includes(feature.id)} />
+                  <ListItemText primary={`${feature.name} (${feature.price}€)`} />
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          {weather && weather.probability > 50 && (
+            <Typography color="warning.main" sx={{ mt: 2 }}>
+              {t('weatherWarning')}: {weather.condition} ({weather.probability}% {t('probability')})
+            </Typography>
+          )}
+          <Button variant="contained" onClick={submitRequest} disabled={loading || !selectedRoom || !startTime || !endTime}>
             {loading ? <CircularProgress size={24} /> : t('submitRequest')}
           </Button>
         </>
