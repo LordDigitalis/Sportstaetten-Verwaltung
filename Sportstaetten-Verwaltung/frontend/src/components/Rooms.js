@@ -21,8 +21,13 @@ const Rooms = () => {
   useEffect(() => {
     setLoading(true);
     axios.get('http://localhost:5000/rooms').then(res => {
-      setRooms(res.data);
-      setLoading(false);
+      Promise.all(res.data.map(async room => {
+        const reviewRes = await axios.get(`http://localhost:5000/reviews/${room.id}`);
+        return { ...room, avg_rating: reviewRes.data.avg_rating };
+      })).then(updatedRooms => {
+        setRooms(updatedRooms);
+        setLoading(false);
+      });
     }).catch(() => {
       alert(t('error'));
       setLoading(false);
@@ -34,7 +39,7 @@ const Rooms = () => {
     const token = localStorage.getItem('token');
     try {
       await axios.post('http://localhost:5000/rooms', { name, capacity, price_per_hour: parseFloat(pricePerHour), lat: parseFloat(lat), lng: parseFloat(lng) }, { headers: { Authorization: `Bearer ${token}` } });
-      setRooms([...rooms, { name, capacity, price_per_hour: parseFloat(pricePerHour), lat: parseFloat(lat), lng: parseFloat(lng) }]);
+      setRooms([...rooms, { name, capacity, price_per_hour: parseFloat(pricePerHour), lat: parseFloat(lat), lng: parseFloat(lng), avg_rating: 0 }]);
       setName('');
       setCapacity('');
       setPricePerHour('');
@@ -72,7 +77,7 @@ const Rooms = () => {
           <List>
             {rooms.map(room => (
               <ListItem key={room.id}>
-                <ListItemText primary={`${room.name} (Kapazität: ${room.capacity}, Preis: ${room.price_per_hour}€/h, Standort: ${room.lat}, ${room.lng})`} />
+                <ListItemText primary={`${room.name} (Kapazität: ${room.capacity}, Preis: ${room.price_per_hour}€/h, Bewertung: ${room.avg_rating.toFixed(1)}/5)`} secondary={`Standort: ${room.lat}, ${room.lng}`} />
               </ListItem>
             ))}
           </List>
@@ -81,7 +86,7 @@ const Rooms = () => {
             {rooms.map(room => (
               room.lat && room.lng && (
                 <Marker key={room.id} position={[room.lat, room.lng]}>
-                  <Popup>{room.name}</Popup>
+                  <Popup>{`${room.name} (Bewertung: ${room.avg_rating.toFixed(1)}/5)`}</Popup>
                 </Marker>
               )
             ))}

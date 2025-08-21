@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import { Container, FormControl, InputLabel, Select, MenuItem } from '@mui/material';
+import { ThemeProvider, createTheme } from '@mui/material/styles';
+import { CssBaseline, Switch, Box, Typography } from '@mui/material';
 import { useTranslation } from 'react-i18next';
 import Login from './components/Login';
 import Register from './components/Register';
@@ -11,27 +12,35 @@ import ContactForm from './components/ContactForm';
 import AdminDashboard from './components/AdminDashboard';
 import BookingRequest from './components/BookingRequest';
 import Payment from './components/Payment';
+import CheckoutForm from './components/CheckoutForm';
 import Success from './components/Success';
 import Cancel from './components/Cancel';
+import Reviews from './components/Reviews';
 import Roles from './components/Roles';
+import Map from './components/Map';
 
-function App() {
+const App = () => {
   const { t } = useTranslation();
+  const [darkMode, setDarkMode] = useState(false);
 
-  const changeLanguage = (lng) => {
-    i18n.changeLanguage(lng);
+  const theme = createTheme({
+    palette: {
+      mode: darkMode ? 'dark' : 'light',
+    },
+  });
+
+  const handleThemeToggle = () => {
+    setDarkMode(!darkMode);
   };
 
   return (
-    <Router>
-      <Container>
-        <FormControl sx={{ m: 1, minWidth: 120 }}>
-          <InputLabel>{t('language')}</InputLabel>
-          <Select value={i18n.language} onChange={(e) => changeLanguage(e.target.value)}>
-            <MenuItem value="de">Deutsch</MenuItem>
-            <MenuItem value="en">English</MenuItem>
-          </Select>
-        </FormControl>
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <Router>
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', p: 2 }}>
+          <Typography variant="body1" sx={{ mr: 1 }}>{t('darkMode')}</Typography>
+          <Switch checked={darkMode} onChange={handleThemeToggle} />
+        </Box>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
@@ -42,14 +51,17 @@ function App() {
           <Route path="/dashboard" element={<AdminDashboard />} />
           <Route path="/request" element={<BookingRequest />} />
           <Route path="/payment/:bookingId" element={<Payment />} />
+          <Route path="/checkout/:bookingId" element={<CheckoutForm />} />
           <Route path="/success" element={<Success />} />
           <Route path="/cancel" element={<Cancel />} />
+          <Route path="/reviews" element={<Reviews />} />
           <Route path="/roles" element={<Roles />} />
+          <Route path="/map" element={<Map />} />
           <Route path="/" element={<Login />} />
         </Routes>
-      </Container>
-    </Router>
+      </Router>
+    </ThemeProvider>
   );
-}
+};
 
 export default App;

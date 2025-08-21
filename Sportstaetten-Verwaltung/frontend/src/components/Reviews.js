@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { TextField, Button, Typography, Box, List, ListItem, ListItemText, Rating, CircularProgress } from '@mui/material';
+import { TextField, Button, Typography, Box, List, ListItem, ListItemText, Rating, CircularProgress, FormControl, InputLabel, Select, MenuItem } from '@mui/material';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
 
@@ -27,7 +27,7 @@ const Reviews = () => {
     if (selectedRoom) {
       setLoading(true);
       axios.get(`http://localhost:5000/reviews/${selectedRoom}`).then(res => {
-        setReviews(res.data);
+        setReviews(res.data.reviews);
         setLoading(false);
       }).catch(() => {
         alert(t('error'));
@@ -44,7 +44,7 @@ const Reviews = () => {
       alert(t('reviewSubmitted'));
       setRating(0);
       setComment('');
-      axios.get(`http://localhost:5000/reviews/${selectedRoom}`).then(res => setReviews(res.data));
+      axios.get(`http://localhost:5000/reviews/${selectedRoom}`).then(res => setReviews(res.data.reviews));
     } catch (err) {
       alert(err.response?.data?.message || t('error'));
     } finally {
@@ -69,7 +69,7 @@ const Reviews = () => {
           </FormControl>
           <Typography variant="h6" gutterBottom>{t('submitReview')}</Typography>
           <Rating value={rating} onChange={(e, newValue) => setRating(newValue)} />
-          <TextField fullWidth label={t('comment')} multiline rows={4} value={comment} onChange={e => setComment(e.target.value)} margin="normal" />
+          <TextField fullWidth label={t('comment')} multiline rows={4} value={comment} onChange={e => setComment(e.target.value)} margin="normal" inputProps={{ maxLength: 500 }} />
           <Button variant="contained" onClick={submitReview} disabled={loading || !selectedRoom || !rating}>
             {loading ? <CircularProgress size={24} /> : t('submit')}
           </Button>

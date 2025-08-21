@@ -44,5 +44,10 @@
   "paypal": "PayPal",
   "sofort": "Sofortüberweisung",
   "updatePaymentStatus": "Zahlungsstatus aktualisieren",
-  "exportCalendar": "Kalender exportieren"
+  "exportCalendar": "Kalender exportieren",
+  "map": "Karte",
+  "admin": "Admin",
+  "manager": "Manager",
+  "citizen": "Bürger",
+  "roleUpdated": "Rolle aktualisiert"
 }

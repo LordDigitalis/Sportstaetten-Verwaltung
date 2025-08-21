@@ -44,5 +44,10 @@
   "paypal": "PayPal",
   "sofort": "Instant Transfer",
   "updatePaymentStatus": "Update Payment Status",
-  "exportCalendar": "Export Calendar"
+  "exportCalendar": "Export Calendar",
+  "map": "Map",
+  "admin": "Admin",
+  "manager": "Manager",
+  "citizen": "Citizen",
+  "roleUpdated": "Role Updated"
 }
